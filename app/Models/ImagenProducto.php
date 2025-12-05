@@ -9,6 +9,9 @@ class ImagenProducto extends Model
 {
     use HasFactory;
 
+    // 👈 MUY IMPORTANTE: nombre correcto de la tabla real en PostgreSQL
+    protected $table = 'imagenes_productos';
+
     protected $fillable = [
         'producto_id',
         'ruta_local',

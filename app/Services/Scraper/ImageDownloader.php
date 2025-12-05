@@ -8,7 +8,7 @@ use Illuminate\Support\Facades\Storage;
 class ImageDownloader
 {
     /**
-     * Descarga una imagen y devuelve la ruta local relativa (ej: "productos/abc123.jpg").
+     * Descarga una imagen y devuelve la ruta local (ej: "productos/123abc.jpg").
      */
     public function download(string $imageUrl): ?string
     {
@@ -17,30 +17,68 @@ class ImageDownloader
                 return null;
             }
 
-            $response = Http::get($imageUrl);
+            // Evitar descargar la misma imagen dos veces
+            $hash = md5($imageUrl);
 
-            if (!$response->successful()) {
+            // Verificar si ya existe una imagen asociada a esta URL
+            $existing = collect(Storage::disk('public')->files('productos'))
+                ->first(fn($f) => str_contains($f, $hash));
+
+            if ($existing) {
+                return 'productos/' . basename($existing);
+            }
+
+            // Descargar imagen
+            $response = Http::withHeaders([
+                'User-Agent' => 'Mozilla/5.0 (Scraper Bot)'
+            ])->get($imageUrl);
+
+            if (!$response->successful() || empty($response->body())) {
                 return null;
             }
 
-            $ext = 'jpg';
-            $parsed = parse_url($imageUrl, PHP_URL_PATH);
-            if ($parsed) {
-                $pathInfo = pathinfo($parsed);
-                if (!empty($pathInfo['extension'])) {
-                    $ext = strtolower($pathInfo['extension']);
-                }
-            }
+            // Detectar extensión real
+            $contentType = $response->header('Content-Type');
+            $ext = $this->guessExtension($imageUrl, $contentType);
 
-            $fileName = uniqid('prod_', true) . '.' . $ext;
+            // Nombre final del archivo
+            $fileName = "prod_{$hash}_" . uniqid() . '.' . $ext;
             $relativePath = 'productos/' . $fileName;
 
+            // Guardar en storage
             Storage::disk('public')->put($relativePath, $response->body());
 
             return $relativePath;
+
         } catch (\Throwable $e) {
-            // Podés loguear si querés
             return null;
         }
+    }
+
+
+    /**
+     * Detecta la extensión más adecuada.
+     */
+    private function guessExtension(string $url, ?string $contentType): string
+    {
+        // Prioridad 1: Content-Type HTTP
+        if ($contentType) {
+            if (str_contains($contentType, 'image/jpeg')) return 'jpg';
+            if (str_contains($contentType, 'image/jpg'))  return 'jpg';
+            if (str_contains($contentType, 'image/png'))  return 'png';
+            if (str_contains($contentType, 'image/webp')) return 'webp';
+        }
+
+        // Prioridad 2: extensión en la URL
+        $path = parse_url($url, PHP_URL_PATH);
+        if ($path) {
+            $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+            if (in_array($ext, ['jpg', 'jpeg', 'png', 'webp'])) {
+                return $ext === 'jpeg' ? 'jpg' : $ext;
+            }
+        }
+
+        // Último recurso
+        return 'jpg';
     }
 }

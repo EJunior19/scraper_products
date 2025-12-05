@@ -13,17 +13,17 @@ class ScrapeCategoria extends Command
     public function handle(ScraperService $scraperService): int
     {
         $url = $this->argument('url');
-        $nombre = $this->argument('nombre');
+        $nombre = $this->argument('nombre') ?? 'Sin categoría';
 
         $this->info("Iniciando scraping de la categoría:");
         $this->info("URL: {$url}");
-        if ($nombre) {
-            $this->info("Nombre: {$nombre}");
-        }
+        $this->info("Nombre: {$nombre}");
 
-        $scraperService->scrapearCategoria($url, $nombre);
+        $total = $scraperService->scrapeCategoria($url, $nombre);
 
         $this->info("✅ Scraping finalizado.");
+        $this->info("📦 Productos nuevos insertados: {$total}");
+
         return self::SUCCESS;
     }
 }

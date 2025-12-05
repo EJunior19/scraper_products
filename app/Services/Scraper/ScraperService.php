@@ -2,120 +2,101 @@
 
 namespace App\Services\Scraper;
 
-use App\Models\Categoria;
 use App\Models\Producto;
+use App\Models\Categoria;
 use App\Models\ImagenProducto;
 use Illuminate\Support\Facades\Http;
-use DOMDocument;
-use DOMXPath;
+use Illuminate\Support\Facades\DB;
 
 class ScraperService
 {
-    public function __construct(
-        protected ProductExtractor $productExtractor,
-        protected ImageDownloader $imageDownloader
-    ) {}
+    protected ProductExtractor $extractor;
+    protected ImageDownloader  $downloader;
 
-    /**
-     * Scrapea una categoría completa (una página).
-     * Si después quieres agregar paginación, aquí es donde se manejaría.
-     */
-    public function scrapearCategoria(string $urlCategoria, ?string $nombre = null): void
+    public function __construct(ProductExtractor $extractor, ImageDownloader $downloader)
     {
-        // 1) Crear/obtener categoría
-        $categoria = Categoria::firstOrCreate(
-            ['url' => $urlCategoria],
-            ['nombre' => $nombre ?: 'Categoría Scrap']
-        );
+        $this->extractor  = $extractor;
+        $this->downloader = $downloader;
+    }
 
-        // 2) Descargar HTML de la categoría
-        $html = Http::get($urlCategoria)->body();
+    public function scrapeCategoria(string $urlCategoria, string $nombreCategoria): int
+    {
+        $categoria = Categoria::firstOrCreate([
+            'nombre' => $nombreCategoria
+        ]);
 
-        $dom = new DOMDocument();
-        @$dom->loadHTML($html);
-        $xpath = new DOMXPath($dom);
+        $html = Http::withOptions(['verify' => false])
+            ->get($urlCategoria)
+            ->body();
 
-        // 🔧 IMPORTANTE:
-        // Ajustá el selector según el ecommerce:
-        // Aquí buscamos <a> que tengan clase product-link o similar.
-        $productLinkNodes = $xpath->query('//a[contains(@class, "product") or contains(@class, "product-link")]');
+        $linkRegex = '/https:\/\/www\.mapy\.com\.py\/produto\/[a-zA-Z0-9\-]+\/?/i';
+        preg_match_all($linkRegex, $html, $matches);
 
-        // Si no encuentra nada, como fallback buscamos todos los enlaces que
-        // contengan "/producto" en la URL (ajustable).
-        if ($productLinkNodes->length === 0) {
-            $productLinkNodes = $xpath->query('//a[contains(@href, "producto")]');
+        $links = array_unique($matches[0]);
+
+        $insertados = 0;
+
+        foreach ($links as $productUrl) {
+            if ($this->scrapeProducto($productUrl, $categoria->id)) {
+                $insertados++;
+            }
         }
 
-        $baseUrl = $this->getBaseUrl($urlCategoria);
+        return $insertados;
+    }
 
-        foreach ($productLinkNodes as $node) {
-            $href = $node->getAttribute('href');
-            if (!$href) {
-                continue;
+    public function scrapeProducto(string $urlProducto, int $categoriaId): bool
+    {
+        try {
+            if (Producto::where('url_producto', $urlProducto)->exists()) {
+                return false;
             }
 
-            $productUrl = $this->makeAbsoluteUrl($href, $baseUrl);
+            // 👉 El extractor debe recibir la URL, NO el HTML
+            $data = $this->extractor->extract($urlProducto);
 
-            // Evitar duplicar productos
-            if (Producto::where('url_producto', $productUrl)->exists()) {
-                continue;
-            }
-
-            $data = $this->productExtractor->extract($productUrl);
             if (!$data) {
-                continue;
+                return false;
             }
 
-            // Crear producto
+            DB::beginTransaction();
+
             $producto = Producto::create([
-                'categoria_id' => $categoria->id,
+                'categoria_id' => $categoriaId,
                 'nombre'       => $data['nombre'],
                 'descripcion'  => $data['descripcion'],
                 'precio'       => $data['precio'],
                 'sku'          => $data['sku'],
-                'url_producto' => $productUrl,
-                'extra_json'   => $data['extra'] ?? [],
+                'url_producto' => $urlProducto,
+                'extra_json'   => json_encode([
+                    'precio_usd' => $data['precio_usd'] ?? null,
+                    'precio_brl' => $data['precio_brl'] ?? null,
+                    'atributos'  => $data['atributos'] ?? [],
+                ])
             ]);
 
-            // Guardar imágenes
-            foreach ($data['imagenes'] as $imageUrl) {
-                $rutaLocal = $this->imageDownloader->download(
-                    $this->makeAbsoluteUrl($imageUrl, $baseUrl)
-                );
+            // GUARDADO DE IMÁGENES
+            if (!empty($data['imagenes'])) {
+                foreach ($data['imagenes'] as $imgUrl) {
 
-                if ($rutaLocal) {
-                    ImagenProducto::create([
-                        'producto_id' => $producto->id,
-                        'ruta_local'  => $rutaLocal,
-                        'url_original'=> $imageUrl,
-                    ]);
+                    $localPath = $this->downloader->download($imgUrl);
+
+                    if ($localPath) {
+                        ImagenProducto::create([
+                            'producto_id'  => $producto->id,
+                            'ruta_local'   => $localPath,
+                            'url_original' => $imgUrl,
+                        ]);
+                    }
                 }
             }
+
+            DB::commit();
+            return true;
+
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            return false;
         }
-    }
-
-    protected function getBaseUrl(string $url): string
-    {
-        $parts = parse_url($url);
-        $scheme = $parts['scheme'] ?? 'https';
-        $host   = $parts['host']   ?? '';
-        return $scheme . '://' . $host;
-    }
-
-    protected function makeAbsoluteUrl(string $href, string $baseUrl): string
-    {
-        if (str_starts_with($href, 'http://') || str_starts_with($href, 'https://')) {
-            return $href;
-        }
-
-        if (str_starts_with($href, '//')) {
-            return 'https:' . $href;
-        }
-
-        if (str_starts_with($href, '/')) {
-            return rtrim($baseUrl, '/') . $href;
-        }
-
-        return rtrim($baseUrl, '/') . '/' . ltrim($href, '/');
     }
 }

@@ -1,70 +1,187 @@
 <!DOCTYPE html>
-<html>
+<html lang="es">
 <head>
     <meta charset="utf-8">
-    <title>Productos recolectados</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+    <title>Productos Recolectados</title>
+
+    <link rel="stylesheet"
+          href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+
+    <style>
+        body {
+            background: #f5f6f8;
+        }
+
+        .product-card {
+            transition: transform .2s, box-shadow .2s;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .product-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+        }
+
+        .product-img {
+            height: 200px;
+            object-fit: cover;
+        }
+
+        .category-tag {
+            background: #eef2ff;
+            border-radius: 50px;
+            padding: 4px 12px;
+            font-size: 0.75rem;
+            color: #3b5bdb;
+            display: inline-block;
+            margin-bottom: 8px;
+        }
+
+        .price {
+            font-weight: bold;
+            color: #0d6efd;
+        }
+
+        .floating-btn {
+            position: fixed;
+            bottom: 25px;
+            right: 25px;
+            z-index: 999;
+        }
+    </style>
 </head>
-<body class="bg-light">
+
+<body>
 
 <div class="container py-4">
-    <h1 class="mb-4">Productos recolectados</h1>
 
-    <form method="GET" class="mb-3">
-        <div class="input-group">
+    <!-- MENSAJES -->
+    @if(session('success'))
+        <div class="alert alert-success shadow-sm">{{ session('success') }}</div>
+    @endif
+
+    @if(session('error'))
+        <div class="alert alert-danger shadow-sm">{{ session('error') }}</div>
+    @endif
+
+    <!-- PANEL SCRAPER -->
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <h5 class="fw-bold mb-3">Scrapear nueva categoría</h5>
+
+            <form action="{{ route('scrapear.categoria') }}" method="POST">
+                @csrf
+
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <input type="url"
+                               name="url"
+                               class="form-control"
+                               placeholder="URL de categoría (ej: https://www.mapy.com.py/categoria-produto/...)"
+                               required>
+                    </div>
+
+                    <div class="col-md-4">
+                        <input type="text"
+                               name="categoria"
+                               class="form-control"
+                               placeholder="Nombre categoría"
+                               required>
+                    </div>
+
+                    <div class="col-md-2">
+                        <button class="btn btn-primary w-100">
+                            Iniciar Scraping
+                        </button>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- TITULO -->
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1 class="h3 fw-bold">Productos Recolectados</h1>
+    </div>
+
+    <!-- BUSCADOR -->
+    <form method="GET" class="mb-4">
+        <div class="input-group shadow-sm">
             <input type="text"
                    name="q"
                    class="form-control"
                    placeholder="Buscar por nombre..."
                    value="{{ request('q') }}">
-            <button class="btn btn-primary" type="submit">Buscar</button>
+            <button class="btn btn-primary">Buscar</button>
         </div>
     </form>
 
+    <!-- SIN PRODUCTOS -->
     @if($productos->count() === 0)
-        <div class="alert alert-info">
-            Todavía no hay productos. Ejecutá:<br>
-            <code>php artisan scrape:categoria &lt;url&gt; "Nombre categoría"</code>
+        <div class="alert alert-info shadow-sm">
+            Todavía no hay productos scrapeados.<br>
+            Podés usar el panel superior para comenzar.
         </div>
     @endif
 
-    <div class="row g-3">
+    <!-- GRID DE PRODUCTOS -->
+    <div class="row g-4">
         @foreach($productos as $producto)
-            <div class="col-md-3 col-sm-6">
-                <div class="card h-100">
+            <div class="col-xl-3 col-lg-4 col-md-6">
+
+                <div class="card product-card h-100 shadow-sm">
+
                     @if($producto->imagenes->first())
                         <img src="{{ asset('storage/'.$producto->imagenes->first()->ruta_local) }}"
-                             class="card-img-top"
-                             style="height:180px; object-fit:cover;">
+                             class="product-img">
+                    @else
+                        <img src="https://via.placeholder.com/500x300?text=Sin+Imagen"
+                             class="product-img">
                     @endif
+
                     <div class="card-body d-flex flex-column">
-                        <h5 class="card-title" style="font-size: 0.95rem;">
+
+                        <span class="category-tag">
+                            {{ $producto->categoria->nombre ?? "Sin categoría" }}
+                        </span>
+
+                        <h5 class="card-title mb-1" style="font-size: 0.95rem;">
                             {{ Str::limit($producto->nombre, 60) }}
                         </h5>
-                        <p class="card-text mb-1">
+
+                        <p class="price mb-2">
                             @if(!is_null($producto->precio))
-                                <strong>USD {{ number_format($producto->precio, 2) }}</strong>
+                                USD {{ number_format($producto->precio, 2) }}
                             @else
-                                <span class="text-muted">Precio no detectado</span>
+                                <span class="text-muted">Precio no disponible</span>
                             @endif
                         </p>
-                        <p class="card-text text-muted mb-2" style="font-size:0.8rem;">
-                            {{ $producto->categoria->nombre ?? 'Sin categoría' }}
-                        </p>
+
                         <a href="{{ route('productos.show', $producto->id) }}"
-                           class="mt-auto btn btn-sm btn-outline-primary">
+                           class="btn btn-outline-primary btn-sm mt-auto">
                             Ver detalles
                         </a>
                     </div>
+
                 </div>
+
             </div>
         @endforeach
     </div>
 
-    <div class="mt-4">
+    <!-- PAGINACIÓN -->
+    <div class="mt-4 d-flex justify-content-center">
         {{ $productos->withQueryString()->links() }}
     </div>
+
 </div>
+
+<!-- BOTÓN FLOTANTE REFRESCAR -->
+<a href="/productos"
+   class="btn btn-primary rounded-circle floating-btn shadow">
+    ↻
+</a>
 
 </body>
 </html>

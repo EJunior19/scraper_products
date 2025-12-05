@@ -9,105 +9,137 @@ use DOMXPath;
 class ProductExtractor
 {
     /**
-     * Extrae datos de un producto desde la URL.
-     *
-     * Devuelve un array:
-     * [
-     *   'nombre'      => string,
-     *   'precio'      => float|null,
-     *   'descripcion' => string|null,
-     *   'sku'         => string|null,
-     *   'imagenes'    => [ 'https://...', ... ],
-     *   'extra'       => [ ... ]
-     * ]
+     * Extraer datos de un producto desde el HTML (NO desde URL).
+     * Ya estás enviando el HTML desde ScraperService.
      */
-    public function extract(string $productUrl): ?array
+    public function extraer(string $html): ?array
     {
         try {
-            $html = Http::get($productUrl)->body();
-
             $dom = new DOMDocument();
             @$dom->loadHTML($html);
             $xpath = new DOMXPath($dom);
 
-            // 🔧 IMPORTANTE:
-            // Ajustá estos selectores según el e-commerce real que vayas a scrapear.
+            // ===========================
+            // 1️⃣ NOMBRE DEL PRODUCTO
+            // ===========================
+            $nombre = trim($xpath->evaluate('string(//h1[contains(@class, "product_title")])'));
 
-            // Nombre (título h1)
-            $nombre = trim($xpath->evaluate('string(//h1)'));
+            // ===========================
+            // 2️⃣ PRECIO PRINCIPAL (GUARANÍES)
+            // ===========================
+            $priceRaw = trim($xpath->evaluate('string(//p[contains(@class, "price")]//bdi)'));
+            $precio = $this->parsePrecio($priceRaw);
 
-            // Precio (span con clase "price" o similar)
-            $precioRaw = $xpath->evaluate('string(//span[contains(@class, "price")])');
-            $precio = $this->parsePrecio($precioRaw);
+            // ===========================
+            // 3️⃣ PRECIO USD & BRL (div valor-promo)
+            // Ejemplo: "$18,47 / R$ 101,22"
+            // ===========================
+            $promoText = trim($xpath->evaluate('string(//div[@valor-promo])'));
+            $precio_usd = null;
+            $precio_brl = null;
 
-            // Descripción (div con clase description, details, etc.)
-            $descripcion = trim($xpath->evaluate('string(//div[contains(@class, "description")])'));
+            if ($promoText !== '') {
+                // Extraer USD
+                if (preg_match('/\$(\d+[.,]?\d*)/', $promoText, $m)) {
+                    $precio_usd = $this->parsePrecio($m[1]);
+                }
 
-            // SKU (si existe algún span con sku)
-            $sku = trim($xpath->evaluate('string(//span[contains(@class, "sku")])'));
-            if ($sku === '') {
-                $sku = null;
+                // Extraer BRL
+                if (preg_match('/R\$\s?(\d+[.,]?\d*)/', $promoText, $m)) {
+                    $precio_brl = $this->parsePrecio($m[1]);
+                }
             }
 
-            // Imágenes (ej: img con clase "product-image")
+            // ===========================
+            // 4️⃣ DESCRIPCIÓN DEL PRODUCTO
+            // ===========================
+            $descripcion = trim($xpath->evaluate('string(//div[contains(@class,"woocommerce-product-details__short-description")])'));
+
+            if ($descripcion === '') {
+                // Descripción larga si existe
+                $descripcion = trim($xpath->evaluate('string(//div[contains(@class,"woocommerce-Tabs-panel--description")])'));
+            }
+
+            // ===========================
+            // 5️⃣ SKU / INFORMACIONES ADICIONALES
+            // ===========================
+            $sku = null;
+            $atributos = [];
+
+            // Tabla "Informaciones adicionales"
+            $rows = $xpath->query('//table[contains(@class,"woocommerce-product-attributes")]//tr');
+
+            foreach ($rows as $tr) {
+                $label = trim($xpath->evaluate('string(./th)', $tr));
+                $value = trim($xpath->evaluate('string(./td)', $tr));
+
+                if ($label !== '' && $value !== '') {
+                    $atributos[$label] = $value;
+
+                    // Detectar SKU si está en la tabla
+                    if (stripos($label, 'SKU') !== false) {
+                        $sku = $value;
+                    }
+                }
+            }
+
+            // ===========================
+            // 6️⃣ IMÁGENES DEL PRODUCTO
+            // ===========================
             $imagenes = [];
-            $nodes = $xpath->query('//img[contains(@class, "product-image")]');
-            foreach ($nodes as $node) {
-                $src = $node->getAttribute('src');
-                if ($src) {
+            $nodes = $xpath->query('//div[contains(@class,"woocommerce-product-gallery")]//img');
+
+            foreach ($nodes as $img) {
+                $src = $img->getAttribute('data-large_image') ?: $img->getAttribute('src');
+                if ($src && !in_array($src, $imagenes)) {
                     $imagenes[] = $src;
                 }
             }
 
-            // Si no encontró imágenes con esa clase, probamos una genérica
+            // Si no encuentra imágenes, fallback genérico
             if (empty($imagenes)) {
                 $nodes = $xpath->query('//img');
-                foreach ($nodes as $node) {
-                    $src = $node->getAttribute('src');
+                foreach ($nodes as $img) {
+                    $src = $img->getAttribute('src');
                     if ($src && !in_array($src, $imagenes)) {
                         $imagenes[] = $src;
                     }
                 }
             }
 
-            if ($nombre === '' && empty($imagenes)) {
-                // Página rara o no es producto
+            // Validación mínima válida
+            if ($nombre === '') {
                 return null;
             }
 
             return [
                 'nombre'      => $nombre,
                 'precio'      => $precio,
-                'descripcion' => $descripcion ?: null,
+                'precio_usd'  => $precio_usd,
+                'precio_brl'  => $precio_brl,
+                'descripcion' => $descripcion,
                 'sku'         => $sku,
                 'imagenes'    => $imagenes,
-                'extra'       => [
-                    'precio_raw' => $precioRaw,
-                ],
+                'atributos'   => $atributos,
             ];
         } catch (\Throwable $e) {
             return null;
         }
     }
 
+    /**
+     * Normaliza números que vienen como:
+     *  149.352 → 149352
+     *  18,47 → 18.47
+     */
     protected function parsePrecio(string $texto): ?float
     {
-        if ($texto === '') {
-            return null;
-        }
+        if ($texto === '') return null;
 
-        // Quitamos todo lo que no es número, coma o punto
         $clean = preg_replace('/[^0-9.,]/', '', $texto);
+        $clean = str_replace('.', '', $clean);
+        $clean = str_replace(',', '.', $clean);
 
-        // Si tiene coma y punto, intentamos adaptar,
-        // pero como concepto: reemplazar coma por nada y dejar punto como decimal
-        $clean = str_replace(['.'], '', $clean);    // sacamos separador de miles
-        $clean = str_replace([','], '.', $clean);   // coma por punto decimal
-
-        if ($clean === '') {
-            return null;
-        }
-
-        return floatval($clean);
+        return is_numeric($clean) ? floatval($clean) : null;
     }
 }
