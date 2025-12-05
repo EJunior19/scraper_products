@@ -19,41 +19,84 @@ class ScraperService
 
     /**
      * ===========================================================
-     *  SCRAPEAR UNA CATEGORÍA COMPLETA USANDO LA STORE API
+     * SCRAPEAR AUTOMÁTICAMENTE SOLO "PERFUMERÍA"
      * ===========================================================
      */
-    public function scrapeCategoria(string $urlCategoria, string $nombreCategoria): int
+    public function scrapePerfumeria(): int
     {
-        // Guardar o recuperar categoría
-        $categoria = Categoria::firstOrCreate(['nombre' => $nombreCategoria]);
+        $insertados = 0;
+        $page = 1;
 
-        // Página 1 (se puede mejorar con paginación futura)
-        $response = Http::withOptions(['verify' => false])
-            ->get('https://www.mapy.com.py/wp-json/wc/store/products', [
+        do {
+            $response = Http::withOptions([
+                'verify'  => false,
+                'timeout' => 60,
+            ])
+            ->withHeaders([
+                'User-Agent' => 'Mozilla/5.0',
+                'Accept'     => 'application/json',
+                'Referer'    => 'https://www.mapy.com.py/',
+                'Origin'     => 'https://www.mapy.com.py',
+            ])
+            ->get('https://www.mapy.com.py/wp-json/wc/store/v1/products', [
                 'per_page' => 100,
-                'page'     => 1,
+                'page'     => $page,
             ]);
 
-        if (!$response->successful()) {
-            return 0;
-        }
-
-        $items = $response->json(); // array de productos JSON
-
-        $insertados = 0;
-
-        foreach ($items as $item) {
-            if ($this->scrapeProductoDesdeApi($item, $categoria->id)) {
-                $insertados++;
+            if (!$response->successful()) {
+                break;
             }
-        }
+
+            $items = $response->json();
+            if (empty($items)) {
+                break;
+            }
+
+            foreach ($items as $item) {
+
+                // ---------------------------------------------
+                // 🔥 1) Detectar si el producto es de PERFUMERÍA
+                // ---------------------------------------------
+                $esPerfumeria = false;
+                $categoriaNombre = "Perfumería";
+
+                foreach ($item['categories'] as $cat) {
+                    if (strtolower($cat['slug']) === 'perfumeria') {
+                        $esPerfumeria = true;
+                        $categoriaNombre = $cat['name']; // ejemplo: Perfumería
+                        break;
+                    }
+                }
+
+                if (!$esPerfumeria) {
+                    continue;
+                }
+
+                // ---------------------------------------------
+                // 🔥 2) Crear o encontrar categoría automáticamente
+                // ---------------------------------------------
+                $categoria = Categoria::firstOrCreate([
+                    'nombre' => $categoriaNombre
+                ]);
+
+                // ---------------------------------------------
+                // 🔥 3) Guardar producto
+                // ---------------------------------------------
+                if ($this->scrapeProductoDesdeApi($item, $categoria->id)) {
+                    $insertados++;
+                }
+            }
+
+            $page++;
+
+        } while (true);
 
         return $insertados;
     }
 
     /**
      * ===========================================================
-     *  PROCESAR UN PRODUCTO INDIVIDUAL DESDE LA STORE API
+     * GUARDAR PRODUCTO INDIVIDUAL
      * ===========================================================
      */
     public function scrapeProductoDesdeApi(array $item, int $categoriaId): bool
@@ -61,14 +104,11 @@ class ScraperService
         try {
             $urlProducto = $item['permalink'];
 
-            // Evitar duplicados
             if (Producto::where('url_producto', $urlProducto)->exists()) {
                 return false;
             }
 
-            // Normalizar datos usando el extractor
             $data = $this->extractor->fromApi($item);
-
             if (!$data) {
                 return false;
             }
@@ -80,25 +120,23 @@ class ScraperService
                 'categoria_id' => $categoriaId,
                 'nombre'       => $data['nombre'],
                 'descripcion'  => $data['descripcion'],
-                'precio'       => $data['precio_gs'], // GUARANÍES
+                'precio'       => $data['precio_gs'],
                 'sku'          => $data['sku'],
                 'url_producto' => $urlProducto,
                 'extra_json'   => [
-                    'precio_usd' => $data['precio_usd'] ?? null,
-                    'precio_brl' => $data['precio_brl'] ?? null,
-                    'atributos'  => $data['atributos'] ?? [],
+                    'precio_usd' => $data['precio_usd'],
+                    'precio_brl' => $data['precio_brl'],
+                    'atributos'  => $data['atributos'],
                 ],
             ]);
 
-            // Guardar imágenes (SOLO URL, NO descargar)
-            if (!empty($data['imagenes'])) {
-                foreach ($data['imagenes'] as $imgUrl) {
-                    ImagenProducto::create([
-                        'producto_id'  => $producto->id,
-                        'ruta_local'   => null,
-                        'url_original' => $imgUrl,
-                    ]);
-                }
+            // Guardar imágenes
+            foreach ($data['imagenes'] as $imgUrl) {
+                ImagenProducto::create([
+                    'producto_id'  => $producto->id,
+                    'ruta_local'   => null,
+                    'url_original' => $imgUrl,
+                ]);
             }
 
             DB::commit();

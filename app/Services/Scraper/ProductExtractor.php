@@ -2,7 +2,8 @@
 
 namespace App\Services\Scraper;
 
-use OpenAI; // 👈 IA para renombrar productos
+use OpenAI;
+use Illuminate\Support\Facades\Http;
 
 class ProductExtractor
 {
@@ -19,22 +20,21 @@ class ProductExtractor
             // ====================================
             $nombreOriginal = $item['name'] ?? null;
             if (!$nombreOriginal) {
-                return null; // producto inválido
+                return null;
             }
 
-            // Formatear CamelCase
+            // Formatear en CamelCase
             $nombreFormateado = $this->formatearNombre($nombreOriginal);
 
-            // Generar nombre alternativo usando IA
+            // Nombre alternativo generado por IA
             $nombreIA = $this->generarNombreConIA($nombreFormateado);
 
             // ====================================
-            // 2️⃣ PRECIO EN GUARANÍES
+            // 2️⃣ PRECIO GUARANÍES
             // ====================================
-            $precio_gs = null;
-            if (isset($item['prices']['price'])) {
-                $precio_gs = $this->parseNumber($item['prices']['price']);
-            }
+            $precio_gs = isset($item['prices']['price'])
+                ? $this->parseNumber($item['prices']['price'])
+                : null;
 
             // ====================================
             // 3️⃣ SKU
@@ -47,19 +47,13 @@ class ProductExtractor
             $descripcion = $item['description'] ?? null;
 
             // ====================================
-            // 5️⃣ IMÁGENES
+            // 5️⃣ IMAGEN (Mejor fuente disponible)
             // ====================================
-            $imagenes = [];
-            if (!empty($item['images'])) {
-                foreach ($item['images'] as $img) {
-                    if (!empty($img['src'])) {
-                        $imagenes[] = $img['src'];
-                    }
-                }
-            }
+            $imagen = $this->getProductImage($item);
+            $imagenes = $imagen ? [$imagen] : [];
 
             // ====================================
-            // 6️⃣ PRECIOS USD/BRL
+            // 6️⃣ PRECIOS USD / BRL
             // ====================================
             $precio_usd = null;
             $precio_brl = null;
@@ -70,7 +64,6 @@ class ProductExtractor
                 if (preg_match('/\$(\d+[.,]?\d*)/', $html, $m)) {
                     $precio_usd = $this->parseNumber($m[1]);
                 }
-
                 if (preg_match('/R\$\s?(\d+[.,]?\d*)/', $html, $m)) {
                     $precio_brl = $this->parseNumber($m[1]);
                 }
@@ -84,6 +77,7 @@ class ProductExtractor
                 foreach ($item['attributes'] as $attr) {
                     $label = $attr['name'] ?? null;
                     $value = implode(', ', $attr['terms'] ?? []);
+
                     if ($label && $value) {
                         $atributos[$label] = $value;
                     }
@@ -91,9 +85,9 @@ class ProductExtractor
             }
 
             return [
-                'nombre'        => $nombreIA,          // 👈 nombre final generado por IA
-                'nombre_base'   => $nombreFormateado,  // 👈 opcional: guardar nombre formateado
-                'nombre_raw'    => $nombreOriginal,    // 👈 opcional: guardar nombre real del e-commerce
+                'nombre'        => $nombreIA,
+                'nombre_base'   => $nombreFormateado,
+                'nombre_raw'    => $nombreOriginal,
                 'precio_gs'     => $precio_gs,
                 'precio_usd'    => $precio_usd,
                 'precio_brl'    => $precio_brl,
@@ -109,7 +103,41 @@ class ProductExtractor
     }
 
     /**
-     * Llama a OpenAI para generar un nombre alternativo atractivo.
+     * ===========================================
+     * 🔥 NUEVO: OBTENER IMAGEN OFICIAL DEL PRODUCTO
+     * ===========================================
+     */
+    private function getProductImage(array $product): ?string
+    {
+        // 1️⃣ featured_media → mejor calidad
+        if (!empty($product['featured_media'])) {
+
+            $media = Http::withOptions(['verify' => false])
+                ->get("https://www.mapy.com.py/wp-json/wp/v2/media/" . $product['featured_media'])
+                ->json();
+
+            if (!empty($media['media_details']['sizes']['full']['source_url'])) {
+                return $media['media_details']['sizes']['full']['source_url'];
+            }
+        }
+
+        // 2️⃣ og:image desde yoast_head
+        if (!empty($product['yoast_head'])) {
+            if (preg_match('/og:image" content="([^"]+)"/', $product['yoast_head'], $match)) {
+                return $match[1];
+            }
+        }
+
+        // 3️⃣ og_image desde yoast_head_json
+        if (!empty($product['yoast_head_json']['og_image'][0]['url'])) {
+            return $product['yoast_head_json']['og_image'][0]['url'];
+        }
+
+        return null;
+    }
+
+    /**
+     * Genera un nombre alternativo con IA.
      */
     private function generarNombreConIA(string $nombre): string
     {
@@ -117,68 +145,47 @@ class ProductExtractor
             $client = OpenAI::client(env('OPENAI_API_KEY'));
 
             $prompt = "
-Crea un nuevo nombre atractivo, elegante y diferente para este perfume: '{$nombre}'.
-No repitas exactamente el nombre original.
-Debe sonar comercial, profesional y usable en un catálogo de perfumes.
-Mantén la capacidad en ml si aparece.
-Ejemplo de estilo:
-'Invictus 100ml – Fragancia Masculina'
-'One Million – Edición 100ml'
+Crea un nombre elegante y comercial para este perfume: '{$nombre}'.
+No uses frases largas ni comillas.
+Mantén los ml si aparecen.
+Devuelve solo el nombre final.
 ";
 
             $respuesta = $client->chat()->create([
                 'model' => 'gpt-4o-mini',
                 'messages' => [
-                    ['role' => 'system', 'content' => 'Eres un experto en branding y nombres comerciales.'],
+                    ['role' => 'system', 'content' => 'Eres un experto en branding de perfumes.'],
                     ['role' => 'user', 'content' => $prompt]
-                ],
+                ]
             ]);
 
             return trim($respuesta['choices'][0]['message']['content']);
 
         } catch (\Throwable $e) {
-            // Si la IA falla, usamos nombre formateado
             return $nombre;
         }
     }
 
     /**
-     * Formatea el nombre a Camel Case
+     * Formatea nombre a CamelCase.
      */
     private function formatearNombre(?string $nombre): ?string
     {
         if (!$nombre) return null;
 
-        // 1️⃣ minúsculas
         $nombre = mb_strtolower($nombre, 'UTF-8');
-
-        // 2️⃣ eliminar espacios múltiples
         $nombre = preg_replace('/\s+/', ' ', $nombre);
-
-        // 3️⃣ CamelCase
         $nombre = mb_convert_case($nombre, MB_CASE_TITLE, "UTF-8");
-
-        // 4️⃣ siglas a mayúsculas
-        $siglas = ['Edt', 'Edp', 'Vip', 'Eau'];
-        foreach ($siglas as $sigla) {
-            $nombre = preg_replace_callback(
-                "/\b{$sigla}\b/i",
-                fn($m) => strtoupper($m[0]),
-                $nombre
-            );
-        }
 
         return trim($nombre);
     }
 
     /**
-     * Normaliza precios numéricos.
+     * Normaliza números de precio.
      */
     private function parseNumber($value): ?float
     {
-        if ($value === null || $value === '') {
-            return null;
-        }
+        if ($value === null || $value === '') return null;
 
         $clean = preg_replace('/[^0-9.,]/', '', $value);
         $clean = str_replace('.', '', $clean);
