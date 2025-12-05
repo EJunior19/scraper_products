@@ -22,7 +22,15 @@ class ScraperController extends Controller
 
             return back()->with('success', "Scraping completado. Productos insertados: {$cantidad}");
         } catch (\Throwable $e) {
-            return back()->with('error', 'Error procesando la URL. Verifique la página.');
+
+            // 👉 Guardar detalles del error para debugging
+            \Log::error("Scraper error: " . $e->getMessage(), [
+                'url' => $url,
+                'categoria' => $categoria,
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return back()->with('error', 'Ocurrió un error durante el scraping. Revisa el log para más detalles.');
         }
     }
 }

@@ -14,8 +14,8 @@ return new class extends Migration
                   ->constrained('productos')
                   ->onDelete('cascade');
 
-            $table->string('ruta_local');   // storage/productos/xxxxx.jpg
-            $table->string('url_original'); // URL original del ecommerce
+            $table->string('ruta_local')->nullable();   
+            $table->string('url_original')->nullable(); 
             $table->timestamps();
         });
     }

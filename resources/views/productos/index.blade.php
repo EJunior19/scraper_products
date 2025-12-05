@@ -8,47 +8,13 @@
           href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
 
     <style>
-        body {
-            background: #f5f6f8;
-        }
-
-        .product-card {
-            transition: transform .2s, box-shadow .2s;
-            border-radius: 12px;
-            overflow: hidden;
-        }
-
-        .product-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 8px 25px rgba(0,0,0,0.12);
-        }
-
-        .product-img {
-            height: 200px;
-            object-fit: cover;
-        }
-
-        .category-tag {
-            background: #eef2ff;
-            border-radius: 50px;
-            padding: 4px 12px;
-            font-size: 0.75rem;
-            color: #3b5bdb;
-            display: inline-block;
-            margin-bottom: 8px;
-        }
-
-        .price {
-            font-weight: bold;
-            color: #0d6efd;
-        }
-
-        .floating-btn {
-            position: fixed;
-            bottom: 25px;
-            right: 25px;
-            z-index: 999;
-        }
+        body { background: #f5f6f8; }
+        .product-card { transition: transform .2s, box-shadow .2s; border-radius: 12px; overflow: hidden; }
+        .product-card:hover { transform: translateY(-4px); box-shadow: 0 8px 25px rgba(0,0,0,0.12); }
+        .product-img { height: 200px; object-fit: cover; width: 100%; }
+        .category-tag { background: #eef2ff; border-radius: 50px; padding: 4px 12px; font-size: 0.75rem; color: #3b5bdb; margin-bottom: 8px; display: inline-block; }
+        .price { font-weight: bold; color: #0d6efd; }
+        .floating-btn { position: fixed; bottom: 25px; right: 25px; z-index: 999; }
     </style>
 </head>
 
@@ -70,7 +36,7 @@
         <div class="card-body">
             <h5 class="fw-bold mb-3">Scrapear nueva categoría</h5>
 
-            <form action="{{ route('scrapear.categoria') }}" method="POST">
+            <form action="{{ route('productos.scrapear') }}" method="POST">
                 @csrf
 
                 <div class="row g-3">
@@ -91,9 +57,7 @@
                     </div>
 
                     <div class="col-md-2">
-                        <button class="btn btn-primary w-100">
-                            Iniciar Scraping
-                        </button>
+                        <button class="btn btn-primary w-100">Iniciar Scraping</button>
                     </div>
                 </div>
             </form>
@@ -108,11 +72,8 @@
     <!-- BUSCADOR -->
     <form method="GET" class="mb-4">
         <div class="input-group shadow-sm">
-            <input type="text"
-                   name="q"
-                   class="form-control"
-                   placeholder="Buscar por nombre..."
-                   value="{{ request('q') }}">
+            <input type="text" name="q" class="form-control"
+                   placeholder="Buscar por nombre..." value="{{ request('q') }}">
             <button class="btn btn-primary">Buscar</button>
         </div>
     </form>
@@ -125,26 +86,22 @@
         </div>
     @endif
 
-    <!-- GRID DE PRODUCTOS -->
+    <!-- GRID -->
     <div class="row g-4">
         @foreach($productos as $producto)
             <div class="col-xl-3 col-lg-4 col-md-6">
-
                 <div class="card product-card h-100 shadow-sm">
 
-                    @if($producto->imagenes->first())
-                        <img src="{{ asset('storage/'.$producto->imagenes->first()->ruta_local) }}"
-                             class="product-img">
-                    @else
-                        <img src="https://via.placeholder.com/500x300?text=Sin+Imagen"
-                             class="product-img">
-                    @endif
+                    @php
+                        $img = $producto->imagenes->first();
+                        $src = $img ? $img->url_original : 'https://via.placeholder.com/500x300?text=Sin+Imagen';
+                    @endphp
+
+                    <img src="{{ $src }}" class="product-img">
 
                     <div class="card-body d-flex flex-column">
 
-                        <span class="category-tag">
-                            {{ $producto->categoria->nombre ?? "Sin categoría" }}
-                        </span>
+                        <span class="category-tag">{{ $producto->categoria->nombre ?? "Sin categoría" }}</span>
 
                         <h5 class="card-title mb-1" style="font-size: 0.95rem;">
                             {{ Str::limit($producto->nombre, 60) }}
@@ -152,7 +109,7 @@
 
                         <p class="price mb-2">
                             @if(!is_null($producto->precio))
-                                USD {{ number_format($producto->precio, 2) }}
+                                ₲ {{ number_format($producto->precio, 0, ',', '.') }}
                             @else
                                 <span class="text-muted">Precio no disponible</span>
                             @endif
@@ -162,10 +119,10 @@
                            class="btn btn-outline-primary btn-sm mt-auto">
                             Ver detalles
                         </a>
+
                     </div>
 
                 </div>
-
             </div>
         @endforeach
     </div>
@@ -177,11 +134,7 @@
 
 </div>
 
-<!-- BOTÓN FLOTANTE REFRESCAR -->
-<a href="/productos"
-   class="btn btn-primary rounded-circle floating-btn shadow">
-    ↻
-</a>
+<a href="/productos" class="btn btn-primary rounded-circle floating-btn shadow">↻</a>
 
 </body>
 </html>

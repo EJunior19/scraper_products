@@ -2,141 +2,185 @@
 
 namespace App\Services\Scraper;
 
-use Illuminate\Support\Facades\Http;
-use DOMDocument;
-use DOMXPath;
+use OpenAI; // 👈 IA para renombrar productos
 
 class ProductExtractor
 {
     /**
-     * Extraer datos de un producto desde el HTML (NO desde URL).
-     * Ya estás enviando el HTML desde ScraperService.
+     * Normaliza la respuesta JSON de la Store API de WooCommerce
+     * y la convierte en un array listo para insertar en DB.
      */
-    public function extraer(string $html): ?array
+    public function fromApi(array $item): ?array
     {
         try {
-            $dom = new DOMDocument();
-            @$dom->loadHTML($html);
-            $xpath = new DOMXPath($dom);
 
-            // ===========================
-            // 1️⃣ NOMBRE DEL PRODUCTO
-            // ===========================
-            $nombre = trim($xpath->evaluate('string(//h1[contains(@class, "product_title")])'));
+            // ====================================
+            // 1️⃣ NOMBRE ORIGINAL
+            // ====================================
+            $nombreOriginal = $item['name'] ?? null;
+            if (!$nombreOriginal) {
+                return null; // producto inválido
+            }
 
-            // ===========================
-            // 2️⃣ PRECIO PRINCIPAL (GUARANÍES)
-            // ===========================
-            $priceRaw = trim($xpath->evaluate('string(//p[contains(@class, "price")]//bdi)'));
-            $precio = $this->parsePrecio($priceRaw);
+            // Formatear CamelCase
+            $nombreFormateado = $this->formatearNombre($nombreOriginal);
 
-            // ===========================
-            // 3️⃣ PRECIO USD & BRL (div valor-promo)
-            // Ejemplo: "$18,47 / R$ 101,22"
-            // ===========================
-            $promoText = trim($xpath->evaluate('string(//div[@valor-promo])'));
+            // Generar nombre alternativo usando IA
+            $nombreIA = $this->generarNombreConIA($nombreFormateado);
+
+            // ====================================
+            // 2️⃣ PRECIO EN GUARANÍES
+            // ====================================
+            $precio_gs = null;
+            if (isset($item['prices']['price'])) {
+                $precio_gs = $this->parseNumber($item['prices']['price']);
+            }
+
+            // ====================================
+            // 3️⃣ SKU
+            // ====================================
+            $sku = $item['sku'] ?? null;
+
+            // ====================================
+            // 4️⃣ DESCRIPCIÓN
+            // ====================================
+            $descripcion = $item['description'] ?? null;
+
+            // ====================================
+            // 5️⃣ IMÁGENES
+            // ====================================
+            $imagenes = [];
+            if (!empty($item['images'])) {
+                foreach ($item['images'] as $img) {
+                    if (!empty($img['src'])) {
+                        $imagenes[] = $img['src'];
+                    }
+                }
+            }
+
+            // ====================================
+            // 6️⃣ PRECIOS USD/BRL
+            // ====================================
             $precio_usd = null;
             $precio_brl = null;
 
-            if ($promoText !== '') {
-                // Extraer USD
-                if (preg_match('/\$(\d+[.,]?\d*)/', $promoText, $m)) {
-                    $precio_usd = $this->parsePrecio($m[1]);
+            if (!empty($item['price_html'])) {
+                $html = $item['price_html'];
+
+                if (preg_match('/\$(\d+[.,]?\d*)/', $html, $m)) {
+                    $precio_usd = $this->parseNumber($m[1]);
                 }
 
-                // Extraer BRL
-                if (preg_match('/R\$\s?(\d+[.,]?\d*)/', $promoText, $m)) {
-                    $precio_brl = $this->parsePrecio($m[1]);
+                if (preg_match('/R\$\s?(\d+[.,]?\d*)/', $html, $m)) {
+                    $precio_brl = $this->parseNumber($m[1]);
                 }
             }
 
-            // ===========================
-            // 4️⃣ DESCRIPCIÓN DEL PRODUCTO
-            // ===========================
-            $descripcion = trim($xpath->evaluate('string(//div[contains(@class,"woocommerce-product-details__short-description")])'));
-
-            if ($descripcion === '') {
-                // Descripción larga si existe
-                $descripcion = trim($xpath->evaluate('string(//div[contains(@class,"woocommerce-Tabs-panel--description")])'));
-            }
-
-            // ===========================
-            // 5️⃣ SKU / INFORMACIONES ADICIONALES
-            // ===========================
-            $sku = null;
+            // ====================================
+            // 7️⃣ ATRIBUTOS
+            // ====================================
             $atributos = [];
-
-            // Tabla "Informaciones adicionales"
-            $rows = $xpath->query('//table[contains(@class,"woocommerce-product-attributes")]//tr');
-
-            foreach ($rows as $tr) {
-                $label = trim($xpath->evaluate('string(./th)', $tr));
-                $value = trim($xpath->evaluate('string(./td)', $tr));
-
-                if ($label !== '' && $value !== '') {
-                    $atributos[$label] = $value;
-
-                    // Detectar SKU si está en la tabla
-                    if (stripos($label, 'SKU') !== false) {
-                        $sku = $value;
+            if (!empty($item['attributes'])) {
+                foreach ($item['attributes'] as $attr) {
+                    $label = $attr['name'] ?? null;
+                    $value = implode(', ', $attr['terms'] ?? []);
+                    if ($label && $value) {
+                        $atributos[$label] = $value;
                     }
                 }
-            }
-
-            // ===========================
-            // 6️⃣ IMÁGENES DEL PRODUCTO
-            // ===========================
-            $imagenes = [];
-            $nodes = $xpath->query('//div[contains(@class,"woocommerce-product-gallery")]//img');
-
-            foreach ($nodes as $img) {
-                $src = $img->getAttribute('data-large_image') ?: $img->getAttribute('src');
-                if ($src && !in_array($src, $imagenes)) {
-                    $imagenes[] = $src;
-                }
-            }
-
-            // Si no encuentra imágenes, fallback genérico
-            if (empty($imagenes)) {
-                $nodes = $xpath->query('//img');
-                foreach ($nodes as $img) {
-                    $src = $img->getAttribute('src');
-                    if ($src && !in_array($src, $imagenes)) {
-                        $imagenes[] = $src;
-                    }
-                }
-            }
-
-            // Validación mínima válida
-            if ($nombre === '') {
-                return null;
             }
 
             return [
-                'nombre'      => $nombre,
-                'precio'      => $precio,
-                'precio_usd'  => $precio_usd,
-                'precio_brl'  => $precio_brl,
-                'descripcion' => $descripcion,
-                'sku'         => $sku,
-                'imagenes'    => $imagenes,
-                'atributos'   => $atributos,
+                'nombre'        => $nombreIA,          // 👈 nombre final generado por IA
+                'nombre_base'   => $nombreFormateado,  // 👈 opcional: guardar nombre formateado
+                'nombre_raw'    => $nombreOriginal,    // 👈 opcional: guardar nombre real del e-commerce
+                'precio_gs'     => $precio_gs,
+                'precio_usd'    => $precio_usd,
+                'precio_brl'    => $precio_brl,
+                'descripcion'   => $descripcion,
+                'sku'           => $sku,
+                'imagenes'      => $imagenes,
+                'atributos'     => $atributos,
             ];
+
         } catch (\Throwable $e) {
             return null;
         }
     }
 
     /**
-     * Normaliza números que vienen como:
-     *  149.352 → 149352
-     *  18,47 → 18.47
+     * Llama a OpenAI para generar un nombre alternativo atractivo.
      */
-    protected function parsePrecio(string $texto): ?float
+    private function generarNombreConIA(string $nombre): string
     {
-        if ($texto === '') return null;
+        try {
+            $client = OpenAI::client(env('OPENAI_API_KEY'));
 
-        $clean = preg_replace('/[^0-9.,]/', '', $texto);
+            $prompt = "
+Crea un nuevo nombre atractivo, elegante y diferente para este perfume: '{$nombre}'.
+No repitas exactamente el nombre original.
+Debe sonar comercial, profesional y usable en un catálogo de perfumes.
+Mantén la capacidad en ml si aparece.
+Ejemplo de estilo:
+'Invictus 100ml – Fragancia Masculina'
+'One Million – Edición 100ml'
+";
+
+            $respuesta = $client->chat()->create([
+                'model' => 'gpt-4o-mini',
+                'messages' => [
+                    ['role' => 'system', 'content' => 'Eres un experto en branding y nombres comerciales.'],
+                    ['role' => 'user', 'content' => $prompt]
+                ],
+            ]);
+
+            return trim($respuesta['choices'][0]['message']['content']);
+
+        } catch (\Throwable $e) {
+            // Si la IA falla, usamos nombre formateado
+            return $nombre;
+        }
+    }
+
+    /**
+     * Formatea el nombre a Camel Case
+     */
+    private function formatearNombre(?string $nombre): ?string
+    {
+        if (!$nombre) return null;
+
+        // 1️⃣ minúsculas
+        $nombre = mb_strtolower($nombre, 'UTF-8');
+
+        // 2️⃣ eliminar espacios múltiples
+        $nombre = preg_replace('/\s+/', ' ', $nombre);
+
+        // 3️⃣ CamelCase
+        $nombre = mb_convert_case($nombre, MB_CASE_TITLE, "UTF-8");
+
+        // 4️⃣ siglas a mayúsculas
+        $siglas = ['Edt', 'Edp', 'Vip', 'Eau'];
+        foreach ($siglas as $sigla) {
+            $nombre = preg_replace_callback(
+                "/\b{$sigla}\b/i",
+                fn($m) => strtoupper($m[0]),
+                $nombre
+            );
+        }
+
+        return trim($nombre);
+    }
+
+    /**
+     * Normaliza precios numéricos.
+     */
+    private function parseNumber($value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        $clean = preg_replace('/[^0-9.,]/', '', $value);
         $clean = str_replace('.', '', $clean);
         $clean = str_replace(',', '.', $clean);
 

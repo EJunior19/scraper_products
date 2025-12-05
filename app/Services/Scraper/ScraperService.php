@@ -11,33 +11,39 @@ use Illuminate\Support\Facades\DB;
 class ScraperService
 {
     protected ProductExtractor $extractor;
-    protected ImageDownloader  $downloader;
 
-    public function __construct(ProductExtractor $extractor, ImageDownloader $downloader)
+    public function __construct(ProductExtractor $extractor)
     {
-        $this->extractor  = $extractor;
-        $this->downloader = $downloader;
+        $this->extractor = $extractor;
     }
 
+    /**
+     * ===========================================================
+     *  SCRAPEAR UNA CATEGORÍA COMPLETA USANDO LA STORE API
+     * ===========================================================
+     */
     public function scrapeCategoria(string $urlCategoria, string $nombreCategoria): int
     {
-        $categoria = Categoria::firstOrCreate([
-            'nombre' => $nombreCategoria
-        ]);
+        // Guardar o recuperar categoría
+        $categoria = Categoria::firstOrCreate(['nombre' => $nombreCategoria]);
 
-        $html = Http::withOptions(['verify' => false])
-            ->get($urlCategoria)
-            ->body();
+        // Página 1 (se puede mejorar con paginación futura)
+        $response = Http::withOptions(['verify' => false])
+            ->get('https://www.mapy.com.py/wp-json/wc/store/products', [
+                'per_page' => 100,
+                'page'     => 1,
+            ]);
 
-        $linkRegex = '/https:\/\/www\.mapy\.com\.py\/produto\/[a-zA-Z0-9\-]+\/?/i';
-        preg_match_all($linkRegex, $html, $matches);
+        if (!$response->successful()) {
+            return 0;
+        }
 
-        $links = array_unique($matches[0]);
+        $items = $response->json(); // array de productos JSON
 
         $insertados = 0;
 
-        foreach ($links as $productUrl) {
-            if ($this->scrapeProducto($productUrl, $categoria->id)) {
+        foreach ($items as $item) {
+            if ($this->scrapeProductoDesdeApi($item, $categoria->id)) {
                 $insertados++;
             }
         }
@@ -45,15 +51,23 @@ class ScraperService
         return $insertados;
     }
 
-    public function scrapeProducto(string $urlProducto, int $categoriaId): bool
+    /**
+     * ===========================================================
+     *  PROCESAR UN PRODUCTO INDIVIDUAL DESDE LA STORE API
+     * ===========================================================
+     */
+    public function scrapeProductoDesdeApi(array $item, int $categoriaId): bool
     {
         try {
+            $urlProducto = $item['permalink'];
+
+            // Evitar duplicados
             if (Producto::where('url_producto', $urlProducto)->exists()) {
                 return false;
             }
 
-            // 👉 El extractor debe recibir la URL, NO el HTML
-            $data = $this->extractor->extract($urlProducto);
+            // Normalizar datos usando el extractor
+            $data = $this->extractor->fromApi($item);
 
             if (!$data) {
                 return false;
@@ -61,33 +75,29 @@ class ScraperService
 
             DB::beginTransaction();
 
+            // Crear producto
             $producto = Producto::create([
                 'categoria_id' => $categoriaId,
                 'nombre'       => $data['nombre'],
                 'descripcion'  => $data['descripcion'],
-                'precio'       => $data['precio'],
+                'precio'       => $data['precio_gs'], // GUARANÍES
                 'sku'          => $data['sku'],
                 'url_producto' => $urlProducto,
-                'extra_json'   => json_encode([
+                'extra_json'   => [
                     'precio_usd' => $data['precio_usd'] ?? null,
                     'precio_brl' => $data['precio_brl'] ?? null,
                     'atributos'  => $data['atributos'] ?? [],
-                ])
+                ],
             ]);
 
-            // GUARDADO DE IMÁGENES
+            // Guardar imágenes (SOLO URL, NO descargar)
             if (!empty($data['imagenes'])) {
                 foreach ($data['imagenes'] as $imgUrl) {
-
-                    $localPath = $this->downloader->download($imgUrl);
-
-                    if ($localPath) {
-                        ImagenProducto::create([
-                            'producto_id'  => $producto->id,
-                            'ruta_local'   => $localPath,
-                            'url_original' => $imgUrl,
-                        ]);
-                    }
+                    ImagenProducto::create([
+                        'producto_id'  => $producto->id,
+                        'ruta_local'   => null,
+                        'url_original' => $imgUrl,
+                    ]);
                 }
             }
 

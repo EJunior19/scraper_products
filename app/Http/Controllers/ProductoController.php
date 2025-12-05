@@ -15,6 +15,12 @@ class ProductoController extends Controller
         if ($search = $request->get('q')) {
             $query->where('nombre', 'ILIKE', '%' . $search . '%');
         }
+        if ($search = $request->get('q')) {
+            $query->where(function($q) use ($search) {
+                $q->where('nombre', 'ILIKE', '%' . $search . '%')
+                ->orWhere('sku', 'ILIKE', '%' . $search . '%');
+            });
+        }
 
         $productos = $query->paginate(24);
 
