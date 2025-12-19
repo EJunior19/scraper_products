@@ -18,104 +18,117 @@ class ScraperService
     }
 
     /**
-     * ===========================================================
-     * SCRAPEAR AUTOMÁTICAMENTE SOLO "PERFUMERÍA"
-     * ===========================================================
+     * ============================================
+     * MÉTODO QUE EL COMANDO ARTISAN USA
+     * ============================================
      */
-    public function scrapePerfumeria(): int
+    public function scrapeCategoria(string $urlCategoria, string $nombreCategoria): int
+    {
+        return $this->scrapeCategoriaHtml($urlCategoria, $nombreCategoria);
+    }
+
+    /**
+     * ============================================
+     * 🔥 SCRAPEAR TODA UNA CATEGORÍA DESDE HTML
+     * ============================================
+     */
+    public function scrapeCategoriaHtml(string $urlCategoria, string $nombreCategoria): int
     {
         $insertados = 0;
-        $page = 1;
 
-        do {
-            $response = Http::withOptions([
-                'verify'  => false,
-                'timeout' => 60,
-            ])
-            ->withHeaders([
-                'User-Agent' => 'Mozilla/5.0',
-                'Accept'     => 'application/json',
-                'Referer'    => 'https://www.mapy.com.py/',
-                'Origin'     => 'https://www.mapy.com.py',
-            ])
-            ->get('https://www.mapy.com.py/wp-json/wc/store/v1/products', [
-                'per_page' => 100,
-                'page'     => $page,
-            ]);
+        // 1) obtener HTML de la categoría
+        $resp = Http::withOptions([
+            'verify' => false,
+            'timeout' => 60
+        ])->get($urlCategoria);
 
-            if (!$response->successful()) {
-                break;
+        if (!$resp->successful()) {
+            return 0;
+        }
+
+        $html = $resp->body();
+
+        // 2) extraer URLs de productos
+        $productUrls = $this->extraerUrlsProductos($html);
+
+        if (empty($productUrls)) {
+            return 0;
+        }
+
+        // 3) crear categoría si no existe
+        $categoria = Categoria::firstOrCreate([
+            'nombre' => $nombreCategoria
+        ]);
+
+        // 4) scrapear cada producto individual
+        foreach ($productUrls as $url) {
+            if ($this->scrapeProductoHtml($url, $categoria->id)) {
+                $insertados++;
             }
-
-            $items = $response->json();
-            if (empty($items)) {
-                break;
-            }
-
-            foreach ($items as $item) {
-
-                // ---------------------------------------------
-                // 🔥 1) Detectar si el producto es de PERFUMERÍA
-                // ---------------------------------------------
-                $esPerfumeria = false;
-                $categoriaNombre = "Perfumería";
-
-                foreach ($item['categories'] as $cat) {
-                    if (strtolower($cat['slug']) === 'perfumeria') {
-                        $esPerfumeria = true;
-                        $categoriaNombre = $cat['name']; // ejemplo: Perfumería
-                        break;
-                    }
-                }
-
-                if (!$esPerfumeria) {
-                    continue;
-                }
-
-                // ---------------------------------------------
-                // 🔥 2) Crear o encontrar categoría automáticamente
-                // ---------------------------------------------
-                $categoria = Categoria::firstOrCreate([
-                    'nombre' => $categoriaNombre
-                ]);
-
-                // ---------------------------------------------
-                // 🔥 3) Guardar producto
-                // ---------------------------------------------
-                if ($this->scrapeProductoDesdeApi($item, $categoria->id)) {
-                    $insertados++;
-                }
-            }
-
-            $page++;
-
-        } while (true);
+        }
 
         return $insertados;
     }
 
     /**
-     * ===========================================================
-     * GUARDAR PRODUCTO INDIVIDUAL
-     * ===========================================================
+     * ============================================
+     * EXTRAER URLs DE PRODUCTOS DESDE UNA CATEGORÍA
+     * ============================================
      */
-    public function scrapeProductoDesdeApi(array $item, int $categoriaId): bool
+    private function extraerUrlsProductos(string $html): array
+    {
+        libxml_use_internal_errors(true);
+
+        $dom = new \DOMDocument();
+        $dom->loadHTML($html);
+        $xpath = new \DOMXPath($dom);
+
+        $urls = [];
+
+        $nodes = $xpath->query('//ul[contains(@class,"products")]//a[@href]');
+        foreach ($nodes as $node) {
+            $href = $node->getAttribute('href');
+
+            if (str_contains($href, '/produto/')) {
+                $urls[] = $href;
+            }
+        }
+
+        return array_unique($urls);
+    }
+
+    /**
+     * ============================================
+     * SCRAPEAR UN PRODUCTO COMPLETO DESDE HTML
+     * ============================================
+     */
+    public function scrapeProductoHtml(string $urlProducto, int $categoriaId): bool
     {
         try {
-            $urlProducto = $item['permalink'];
-
+            // evitar duplicados
             if (Producto::where('url_producto', $urlProducto)->exists()) {
                 return false;
             }
 
-            $data = $this->extractor->fromApi($item);
+            // obtener HTML del producto
+            $resp = Http::withOptions([
+                'verify' => false,
+                'timeout' => 60
+            ])->get($urlProducto);
+
+            if (!$resp->successful()) {
+                return false;
+            }
+
+            $data = $this->extractor->fromHtml($resp->body());
+
             if (!$data) {
                 return false;
             }
 
             DB::beginTransaction();
 
-            // Crear producto
+            // crear producto
             $producto = Producto::create([
                 'categoria_id' => $categoriaId,
                 'nombre'       => $data['nombre'],
@@ -126,16 +139,16 @@ class ScraperService
                 'extra_json'   => [
                     'precio_usd' => $data['precio_usd'],
                     'precio_brl' => $data['precio_brl'],
-                    'atributos'  => $data['atributos'],
-                ],
+                    'categorias_html' => $data['categorias'],
+                ]
             ]);
 
-            // Guardar imágenes
+            // guardar imágenes
             foreach ($data['imagenes'] as $imgUrl) {
                 ImagenProducto::create([
                     'producto_id'  => $producto->id,
                     'ruta_local'   => null,
-                    'url_original' => $imgUrl,
+                    'url_original' => $imgUrl
                 ]);
             }
 

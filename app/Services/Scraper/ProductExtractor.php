@@ -2,59 +2,37 @@
 
 namespace App\Services\Scraper;
 
-use OpenAI;
+use DOMDocument;
+use DOMXPath;
 use Illuminate\Support\Facades\Http;
 
 class ProductExtractor
 {
     /**
-     * Normaliza la respuesta JSON de la Store API de WooCommerce
-     * y la convierte en un array listo para insertar en DB.
+     * ================================================
+     *  M O D O   A P I
+     * ================================================
      */
     public function fromApi(array $item): ?array
     {
         try {
-
-            // ====================================
-            // 1️⃣ NOMBRE ORIGINAL
-            // ====================================
             $nombreOriginal = $item['name'] ?? null;
-            if (!$nombreOriginal) {
-                return null;
-            }
+            if (!$nombreOriginal) return null;
 
-            // Formatear en CamelCase
-            $nombreFormateado = $this->formatearNombre($nombreOriginal);
+            $nombreLimpio = $this->limpiarNombreProducto($nombreOriginal);
+            $nombreFormateado = $this->formatearNombre($nombreLimpio);
 
-            // Nombre alternativo generado por IA
-            $nombreIA = $this->generarNombreConIA($nombreFormateado);
+            $precio_gs = $item['prices']['price'] ?? null;
+            $precio_gs = $this->parseNumber($precio_gs);
 
-            // ====================================
-            // 2️⃣ PRECIO GUARANÍES
-            // ====================================
-            $precio_gs = isset($item['prices']['price'])
-                ? $this->parseNumber($item['prices']['price'])
-                : null;
-
-            // ====================================
-            // 3️⃣ SKU
-            // ====================================
             $sku = $item['sku'] ?? null;
-
-            // ====================================
-            // 4️⃣ DESCRIPCIÓN
-            // ====================================
             $descripcion = $item['description'] ?? null;
 
-            // ====================================
-            // 5️⃣ IMAGEN (Mejor fuente disponible)
-            // ====================================
+            // Imagen API
             $imagen = $this->getProductImage($item);
             $imagenes = $imagen ? [$imagen] : [];
 
-            // ====================================
-            // 6️⃣ PRECIOS USD / BRL
-            // ====================================
+            // Precios USD y BRL
             $precio_usd = null;
             $precio_brl = null;
 
@@ -64,28 +42,14 @@ class ProductExtractor
                 if (preg_match('/\$(\d+[.,]?\d*)/', $html, $m)) {
                     $precio_usd = $this->parseNumber($m[1]);
                 }
+
                 if (preg_match('/R\$\s?(\d+[.,]?\d*)/', $html, $m)) {
                     $precio_brl = $this->parseNumber($m[1]);
                 }
             }
 
-            // ====================================
-            // 7️⃣ ATRIBUTOS
-            // ====================================
-            $atributos = [];
-            if (!empty($item['attributes'])) {
-                foreach ($item['attributes'] as $attr) {
-                    $label = $attr['name'] ?? null;
-                    $value = implode(', ', $attr['terms'] ?? []);
-
-                    if ($label && $value) {
-                        $atributos[$label] = $value;
-                    }
-                }
-            }
-
             return [
-                'nombre'        => $nombreIA,
+                'nombre'        => $nombreFormateado,
                 'nombre_base'   => $nombreFormateado,
                 'nombre_raw'    => $nombreOriginal,
                 'precio_gs'     => $precio_gs,
@@ -94,7 +58,7 @@ class ProductExtractor
                 'descripcion'   => $descripcion,
                 'sku'           => $sku,
                 'imagenes'      => $imagenes,
-                'atributos'     => $atributos,
+                'atributos'     => $item['attributes'] ?? [],
             ];
 
         } catch (\Throwable $e) {
@@ -103,94 +67,161 @@ class ProductExtractor
     }
 
     /**
-     * ===========================================
-     * 🔥 NUEVO: OBTENER IMAGEN OFICIAL DEL PRODUCTO
-     * ===========================================
+     * ========================================================
+     *  M O D O   H T M L
+     * ========================================================
      */
+    public function fromHtml(string $html): ?array
+    {
+        libxml_use_internal_errors(true);
+
+        $dom = new DOMDocument();
+        $dom->loadHTML($html);
+        $xpath = new DOMXPath($dom);
+
+        // NOMBRE
+        $nombreNode = $xpath->query('//h1[contains(@class,"product_title")]')->item(0);
+        if (!$nombreNode) return null;
+
+        $nombreOriginal = trim($nombreNode->textContent);
+        $nombreLimpio = $this->limpiarNombreProducto($nombreOriginal);
+        $nombreFormateado = $this->formatearNombre($nombreLimpio);
+
+        // PRECIO GS
+        $priceNode = $xpath->query('//p[@class="price"]//bdi')->item(0);
+        $precio_gs = $priceNode ? $this->parseNumber($priceNode->textContent) : null;
+
+        // PRECIO USD / BRL
+        $usdNode = $xpath->query('//div[contains(@class,"font-14")]')->item(0);
+        $precio_usd = null;
+        $precio_brl = null;
+
+        if ($usdNode) {
+            $text = $usdNode->textContent;
+
+            if (preg_match('/\$(\d+[.,]?\d*)/', $text, $m)) {
+                $precio_usd = $this->parseNumber($m[1]);
+            }
+
+            if (preg_match('/R\$\s?(\d+[.,]?\d*)/', $text, $m)) {
+                $precio_brl = $this->parseNumber($m[1]);
+            }
+        }
+
+        // SKU
+        $skuNode = $xpath->query('//span[@class="sku"]')->item(0);
+        $sku = $skuNode ? trim($skuNode->textContent) : null;
+
+        // CATEGORÍAS
+        $categorias = [];
+        foreach ($xpath->query('//span[contains(@class,"posted_in")]//a') as $cat) {
+            $categorias[] = trim($cat->textContent);
+        }
+
+        // IMÁGENES (mejor calidad posible)
+        $imagenes = [];
+
+        foreach ($xpath->query('//img[contains(@class,"wp-post-image")]') as $img) {
+
+            $full = $img->getAttribute('data-large_image');
+            if ($full) {
+                $imagenes[] = $full;
+                continue;
+            }
+
+            $dataSrc = $img->getAttribute('data-src');
+            if ($dataSrc) {
+                $imagenes[] = $dataSrc;
+                continue;
+            }
+
+            $srcset = $img->getAttribute('srcset');
+            if ($srcset) {
+                $urls = explode(',', $srcset);
+                if (!empty($urls)) {
+                    $first = trim(explode(' ', $urls[count($urls) - 1])[0]);
+                    if ($first) {
+                        $imagenes[] = $first;
+                        continue;
+                    }
+                }
+            }
+
+            $src = $img->getAttribute('src');
+            if ($src) {
+                $imagenes[] = $src;
+            }
+        }
+
+        // DESCRIPCIÓN
+        $descNode = $xpath->query('//div[@id="tab-description"]')->item(0);
+        $descripcion = $descNode ? trim($descNode->textContent) : null;
+
+        return [
+            'nombre'        => $nombreFormateado,
+            'nombre_base'   => $nombreFormateado,
+            'nombre_raw'    => $nombreOriginal,
+            'precio_gs'     => $precio_gs,
+            'precio_usd'    => $precio_usd,
+            'precio_brl'    => $precio_brl,
+            'descripcion'   => $descripcion,
+            'sku'           => $sku,
+            'imagenes'      => $imagenes,
+            'categorias'    => $categorias,
+            'atributos'     => [],
+        ];
+    }
+
+    /* ============================== */
+    /* Helpers                        */
+    /* ============================== */
+
+    private function limpiarNombreProducto(string $texto): string
+    {
+        $texto = preg_replace('/^para un perfume como\s*/i', '', $texto);
+        $texto = preg_replace('/["“”]/', '', $texto);
+        $texto = preg_split(
+            '/(un nombre elegante|que refleja|ideal para|este perfume|podría ser)/i',
+            $texto
+        )[0];
+
+        return trim(preg_replace('/\s+/', ' ', $texto));
+    }
+
     private function getProductImage(array $product): ?string
     {
-        // 1️⃣ featured_media → mejor calidad
         if (!empty($product['featured_media'])) {
-
             $media = Http::withOptions(['verify' => false])
                 ->get("https://www.mapy.com.py/wp-json/wp/v2/media/" . $product['featured_media'])
                 ->json();
 
-            if (!empty($media['media_details']['sizes']['full']['source_url'])) {
-                return $media['media_details']['sizes']['full']['source_url'];
-            }
+            return $media['media_details']['sizes']['full']['source_url'] ?? null;
         }
 
-        // 2️⃣ og:image desde yoast_head
-        if (!empty($product['yoast_head'])) {
-            if (preg_match('/og:image" content="([^"]+)"/', $product['yoast_head'], $match)) {
-                return $match[1];
-            }
+        if (!empty($product['yoast_head']) &&
+            preg_match('/og:image" content="([^"]+)"/', $product['yoast_head'], $match)) {
+            return $match[1];
         }
 
-        // 3️⃣ og_image desde yoast_head_json
-        if (!empty($product['yoast_head_json']['og_image'][0]['url'])) {
-            return $product['yoast_head_json']['og_image'][0]['url'];
-        }
-
-        return null;
+        return $product['yoast_head_json']['og_image'][0]['url'] ?? null;
     }
 
-    /**
-     * Genera un nombre alternativo con IA.
-     */
-    private function generarNombreConIA(string $nombre): string
-    {
-        try {
-            $client = OpenAI::client(env('OPENAI_API_KEY'));
-
-            $prompt = "
-Crea un nombre elegante y comercial para este perfume: '{$nombre}'.
-No uses frases largas ni comillas.
-Mantén los ml si aparecen.
-Devuelve solo el nombre final.
-";
-
-            $respuesta = $client->chat()->create([
-                'model' => 'gpt-4o-mini',
-                'messages' => [
-                    ['role' => 'system', 'content' => 'Eres un experto en branding de perfumes.'],
-                    ['role' => 'user', 'content' => $prompt]
-                ]
-            ]);
-
-            return trim($respuesta['choices'][0]['message']['content']);
-
-        } catch (\Throwable $e) {
-            return $nombre;
-        }
-    }
-
-    /**
-     * Formatea nombre a CamelCase.
-     */
     private function formatearNombre(?string $nombre): ?string
     {
         if (!$nombre) return null;
-
         $nombre = mb_strtolower($nombre, 'UTF-8');
         $nombre = preg_replace('/\s+/', ' ', $nombre);
-        $nombre = mb_convert_case($nombre, MB_CASE_TITLE, "UTF-8");
-
-        return trim($nombre);
+        return mb_convert_case($nombre, MB_CASE_TITLE, 'UTF-8');
     }
 
-    /**
-     * Normaliza números de precio.
-     */
     private function parseNumber($value): ?float
     {
-        if ($value === null || $value === '') return null;
+        if (!$value) return null;
 
         $clean = preg_replace('/[^0-9.,]/', '', $value);
         $clean = str_replace('.', '', $clean);
         $clean = str_replace(',', '.', $clean);
 
-        return is_numeric($clean) ? floatval($clean) : null;
+        return is_numeric($clean) ? (float) $clean : null;
     }
 }
